@@ -56,6 +56,25 @@
       padding: 2em;
       background-color: #222;
     }
+    .mods {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1em;
+    }
+    .mod-group {
+      background-color: #111;
+      border-left: 4px solid #b00000;
+      padding: 1em;
+      border-radius: 4px;
+    }
+    .mod-group h3 {
+      margin-top: 0;
+      color: red;
+    }
+    .mod-group ul {
+      margin: 0;
+      padding-left: 1.2em;
+    }
     footer {
       background-color: #000;
       text-align: center;
@@ -87,6 +106,7 @@
 
   <nav aria-label="Main navigation">
     <a href="#menu">Menu</a>
+    <a href="#mods">Mods</a>
     <a href="#about">About</a>
     <a href="#contact">Contact</a>
   </nav>
@@ -94,6 +114,39 @@
   <section id="menu">
     <h2>Our Menu</h2>
     <p>Signature fried rice, steak, and shrimp dishes – all with authentic Asian flair.</p>
+  </section>
+
+  <section id="mods">
+    <h2>Mods &amp; Add-Ons</h2>
+    <p>Make it your way – customize any plate with these mods.</p>
+    <div class="mods">
+      <div class="mod-group">
+        <h3>Extra Protein</h3>
+        <ul>
+          <li>Add Steak</li>
+          <li>Add Shrimp</li>
+          <li>Add Chicken</li>
+        </ul>
+      </div>
+      <div class="mod-group">
+        <h3>Sauces</h3>
+        <ul>
+          <li>Yum Yum Sauce</li>
+          <li>Teriyaki</li>
+          <li>Spicy Mayo</li>
+          <li>Ginger Sauce</li>
+        </ul>
+      </div>
+      <div class="mod-group">
+        <h3>Swaps &amp; Extras</h3>
+        <ul>
+          <li>Extra Fried Rice</li>
+          <li>Swap Rice for Noodles</li>
+          <li>Extra Veggies</li>
+          <li>No Onions / No Egg</li>
+        </ul>
+      </div>
+    </div>
   </section>
 
   <section id="about">
