@@ -24,6 +24,11 @@
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { CopyShader } from 'three/addons/shaders/CopyShader.js';
 // ================= SIM FEED (multi-symbol, feed-only indicators) =================
 // ============================================================ HOLO DESK FEED
 // Multi-symbol SIM feed, adapted from the Clockwork Stage 4 Data Feed
@@ -169,6 +174,7 @@ function tick(S) {
   const lc = S.live;
   lc.high = Math.max(lc.high, p); lc.low = Math.min(lc.low, p); lc.close = p;
   S._volAcc += (S.meta.baseVol / TICKS_PER_CANDLE) * (0.45 + S.rnd() * 1.1);
+  lc.v = Math.round(S._volAcc);   // the forming candle shows its volume so far
   // daily series' forming candle tracks the intraday day
   const dl = S.daily.live;
   if (dl) { dl.high = Math.max(dl.high, p); dl.low = Math.min(dl.low, p); dl.close = p; }
@@ -1680,6 +1686,26 @@ function createChart(canvas) {
     return { text: 'Mapping candidate entry setups', done: 0 };
   }
 
+  // gradient + dot grid + world map never change: ~1,100 arcs drawn once
+  let bgCanvas = null;
+  function backdrop() {
+    if (bgCanvas) return bgCanvas;
+    bgCanvas = document.createElement('canvas');
+    bgCanvas.width = CHART_W; bgCanvas.height = CHART_H;
+    const b = bgCanvas.getContext('2d');
+    const bg = b.createLinearGradient(0, 0, 0, CHART_H);
+    bg.addColorStop(0, 'rgba(10,34,66,0.97)'); bg.addColorStop(1, 'rgba(13,36,66,0.97)');
+    b.fillStyle = bg; b.fillRect(0, 0, CHART_W, CHART_H);
+    b.fillStyle = 'rgba(90,180,255,0.05)';
+    for (let x = 24; x < CHART_W; x += 46) for (let y = 24; y < CHART_H; y += 46) { b.beginPath(); b.arc(x, y, 1.3, 0, 7); b.fill(); }
+    b.fillStyle = 'rgba(110,200,255,0.10)';
+    for (let r = 0; r < MAP.length; r++) for (let c = 0; c < MAP[r].length; c++) {
+      if (MAP[r][c] !== '#') continue;
+      b.beginPath(); b.arc((c + 0.5) / 72 * CHART_W, (r + 0.5) / MAP.length * CHART_H, 3.4, 0, 7); b.fill();
+    }
+    return bgCanvas;
+  }
+
   function draw({ S, tf, desk, beam, now }) {
     // shutter clock (rAF timestamp from main; performance.now fallback)
     const tNow = typeof now === 'number' ? now : performance.now();
@@ -1693,11 +1719,18 @@ function createChart(canvas) {
     const def = TF_DEF[tf];
     // ---- assemble displayed series ----
     let disp, liveDisp = null, srcIndex = null; // srcIndex: display idx -> source candle idx (intra only)
+    let g0 = 0; // first displayed group's index in the full resample (pattern mapping)
     if (def.src === 'intra') {
-      const groups = resampleCandles(S.candles, def.f);
+      // Resample only the tail the window needs plus 150 groups of EMA
+      // warm-up (EMA 50 residual < 0.3%), not the whole growing history:
+      // the cost stays flat however long the desk has been running.
+      const start = Math.max(0, Math.floor((S.candles.length - (def.n + 150) * def.f) / def.f) * def.f);
+      g0 = start / def.f;
+      const groups = resampleCandles(start ? S.candles.slice(start) : S.candles, def.f);
+      for (const c of groups) c.n0 += start;
       disp = groups.slice();
       // forming candle: leftover source candles + live candle
-      const used = groups.length * def.f;
+      const used = start + groups.length * def.f;
       if (S.candles.length > used || true) {
         let o = null, h = -Infinity, l = Infinity, v = 0;
         for (let i = used; i < S.candles.length; i++) {
@@ -1736,17 +1769,9 @@ function createChart(canvas) {
     layout.win = win; layout.i0 = i0;
     const vis = disp.slice(i0);
 
-    // ---- background ----
-    const bg = g.createLinearGradient(0, 0, 0, CHART_H);
-    bg.addColorStop(0, 'rgba(10,34,66,0.97)'); bg.addColorStop(1, 'rgba(13,36,66,0.97)');
-    g.fillStyle = bg; g.fillRect(0, 0, CHART_W, CHART_H);
-    g.fillStyle = 'rgba(90,180,255,0.05)';
-    for (let x = 24; x < CHART_W; x += 46) for (let y = 24; y < CHART_H; y += 46) { g.beginPath(); g.arc(x, y, 1.3, 0, 7); g.fill(); }
-    g.fillStyle = 'rgba(110,200,255,0.10)';
-    for (let r = 0; r < MAP.length; r++) for (let c = 0; c < MAP[r].length; c++) {
-      if (MAP[r][c] !== '#') continue;
-      g.beginPath(); g.arc((c + 0.5) / 72 * CHART_W, (r + 0.5) / MAP.length * CHART_H, 3.4, 0, 7); g.fill();
-    }
+    // ---- background (static: painted once, then blitted) ----
+    g.clearRect(0, 0, CHART_W, CHART_H);
+    g.drawImage(backdrop(), 0, 0);
 
     // ---- plot geometry ----
     const PX0 = 250, PX1 = 1904, PY0 = 158, PY1 = 624, VY1 = 680;
@@ -1827,7 +1852,7 @@ function createChart(canvas) {
     if (def.src === 'intra') {
       for (const pe of S.patternHistory) {
         const srcIdx = pe.n - 1; // candle that stamped it
-        const dIdx = Math.floor(srcIdx / def.f) - i0;
+        const dIdx = Math.floor(srcIdx / def.f) - g0 - i0;
         if (dIdx < -2 || dIdx >= win) continue;
         const x = X(Math.max(0, Math.min(win - 1, dIdx)));
         g.font = '700 19px monospace';
@@ -1955,8 +1980,9 @@ function createChart(canvas) {
     const pct = S.prevDayClose ? (chgDay / S.prevDayClose) * 100 : 0;
     g.fillStyle = '#FFFFFF'; g.font = '700 47px system-ui, sans-serif'; g.textBaseline = 'alphabetic';
     g.fillText(meta.sym, 46, 66);
+    const symW = g.measureText(meta.sym).width;
     g.font = '400 24px system-ui, sans-serif'; g.fillStyle = 'rgba(190,225,255,0.8)';
-    g.fillText(meta.name + ' · SIM', 46 + g.measureText('').width + (meta.sym.length * 30) + 26, 66);
+    g.fillText(meta.name + ' · SIM', 46 + symW + 22, 66);
     g.font = '800 88px system-ui, sans-serif'; g.fillStyle = '#FFFFFF';
     g.fillText(fmtPrice(last), 44, 158);
     g.font = '700 30px system-ui, sans-serif'; g.fillStyle = tagCol;
@@ -1973,7 +1999,7 @@ function createChart(canvas) {
     rows.forEach(([k, v, col], i) => {
       const y = 246 + i * 35;
       g.fillStyle = col; g.fillText(k, 46, y);
-      g.fillStyle = '#EAF6FF'; g.fillText(v, 118, y);
+      g.fillStyle = '#EAF6FF'; g.fillText(v, 152, y);
     });
     // plan status strip, bottom-left of the plot
     if (plan) {
@@ -2214,6 +2240,18 @@ function createScene(THREE, OrbitControls, renderer, chartCanvas) {
   chartTex.anisotropy = 8;
   const scrGeo = new THREE.CylinderGeometry(SCR_R, SCR_R, SCR_H, 64, 1, true, Math.PI - ARC / 2, ARC);
   const screenMat = new THREE.MeshBasicMaterial({ map: chartTex, transparent: true, opacity: 0.97, side: THREE.DoubleSide, depthWrite: false });
+  // Hologram glass: drifting scanlines and a brighter rim toward the
+  // glass edges, computed per pixel in the material's own shader (one
+  // uniform per frame, no extra draw calls or render targets).
+  const glassTime = { value: 0 };
+  screenMat.onBeforeCompile = (sh) => {
+    sh.uniforms.uGlassTime = glassTime;
+    sh.fragmentShader = 'uniform float uGlassTime;\n' + sh.fragmentShader.replace('#include <map_fragment>', `#include <map_fragment>
+      float holoScan = 0.92 + 0.08 * sin(vMapUv.y * 820.0 - uGlassTime * 5.0);
+      float holoBand = smoothstep(0.0, 0.06, fract(vMapUv.y * 0.5 - uGlassTime * 0.06)) * 0.06;
+      float holoRim = pow(max(abs(fract(vMapUv.x) - 0.5), abs(vMapUv.y - 0.5)) * 2.0, 6.0) * 0.35;  // fract: map.repeat.x is -1
+      diffuseColor.rgb = diffuseColor.rgb * (holoScan - holoBand) + vec3(0.21, 0.62, 1.0) * holoRim;`);
+  };
   const screen = new THREE.Mesh(scrGeo, screenMat);
   screen.position.copy(SCR_C); screen.renderOrder = 3;
   scrGroup.add(screen);
@@ -2533,6 +2571,7 @@ function createScene(THREE, OrbitControls, renderer, chartCanvas) {
     curtainMat.opacity = 0.10 + 0.04 * Math.sin(t * 1.7);
     scrGroup.position.y = Math.sin(t * 0.8) * 0.12;
     screenMat.opacity = 0.95 + 0.04 * Math.sin(t * 7.3) * Math.sin(t * 1.31);
+    glassTime.value = t;
     ghostMat.opacity = 0.13 + 0.05 * Math.sin(t * 2.3);
     const sweepPhase = (t % 8) / 8;
     sweep.rotation.y = (sweepPhase - 0.5) * (ARC + 0.8);
@@ -2555,9 +2594,15 @@ function createScene(THREE, OrbitControls, renderer, chartCanvas) {
     return { main, shadow: 0, combined: main, tris: Math.round(tris) };
   }
 
+  // Detail switch for the quality controller: the low tier drops the two
+  // faintest full-screen echo layers and the motes (overdraw, not looks).
+  function setDetail(low) {
+    ghost2.visible = !low; frontEcho.visible = !low; particles.visible = !low;
+  }
+
   return {
     scene, camera, controls, crew, screen, chartTex, flyTo, update, counts, VIEWS, setViewport, plate: plat,
-    ambient, setFitPoints, screenAnchors, fitToFrame, markUserMoved,
+    ambient, setFitPoints, screenAnchors, fitToFrame, markUserMoved, setDetail,
     screenBox() {
       const corners = screenAnchors();
       const c = [0, 0, 0];
@@ -3778,6 +3823,97 @@ const sceneH = createScene(THREE, OrbitControls, renderer, chartCanvas);
   sceneH.setViewport(sw, sh);
 }
 
+// ---------- quality: bloom + adaptive resolution ----------
+// Four tiers, best first. The page starts at tier 0 (tier 1 on touch
+// devices) and steps down when frames run long, so a phone keeps a
+// steady frame rate instead of stuttering at full resolution:
+//   0  ULTRA  pixel ratio up to 2.0, bloom on
+//   1  HIGH   pixel ratio up to 1.5, bloom on
+//   2  MEDIUM pixel ratio up to 1.25, bloom off
+//   3  LOW    pixel ratio 1.0, bloom off, faint echo layers + motes off,
+//             beam redraws of the chart at ~6 Hz instead of ~11 Hz
+// ?quality=0..3 in the URL pins a tier and turns the controller off.
+const TIERS = [
+  { name: 'ULTRA', dpr: 2, bloom: true, low: false, beamMs: 90 },
+  { name: 'HIGH', dpr: 1.5, bloom: true, low: false, beamMs: 90 },
+  { name: 'MEDIUM', dpr: 1.25, bloom: false, low: false, beamMs: 90 },
+  { name: 'LOW', dpr: 1, bloom: false, low: true, beamMs: 160 },
+];
+// The bloom chain must keep the desk's colour balance. A normal composer
+// target blends every transparent layer (glass, slab, echoes, glow
+// plane) in linear light, which lifts the whole scene into a grey haze.
+// So the scene target is plain 8-bit RGBA flagged like three's XR
+// targets: r160 then has materials write sRGB-encoded colour into it,
+// blending happens in gamma space exactly as on the canvas, and the
+// last pass is a plain copy, not a second colour conversion. 4x MSAA
+// keeps the antialiasing the canvas had. (Relies on r160 internals —
+// three is pinned to 0.160.0 above; re-check this if it is upgraded.)
+const sceneTarget = new THREE.WebGLRenderTarget(1, 1, { type: THREE.UnsignedByteType, samples: 4 });
+sceneTarget.texture.colorSpace = THREE.SRGBColorSpace;
+sceneTarget.texture.internalFormat = 'RGBA8';
+const composer = new EffectComposer(renderer, sceneTarget);
+composer.renderTarget1.isXRRenderTarget = true;
+composer.renderTarget2.isXRRenderTarget = true;
+composer.addPass(new RenderPass(sceneH.scene, sceneH.camera));
+// threshold keeps the glow on rings, rails, beams and lit text only
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.42, 0.32, 0.88);
+composer.addPass(bloomPass);
+composer.addPass(new ShaderPass(CopyShader));
+const quality = (() => {
+  const pinned = /[?&]quality=([0-3])\b/.exec(location.search);
+  const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+  const Q = {
+    tier: pinned ? +pinned[1] : coarse ? 1 : 0, pinned: !!pinned,
+    samples: [], holdUntil: 3, clock: 0, lastChange: -99, changes: 0,
+  };
+  Q.apply = () => {
+    const t = TIERS[Q.tier];
+    const pr = Math.min(window.devicePixelRatio || 1, t.dpr);
+    renderer.setPixelRatio(pr);
+    composer.setPixelRatio(pr);
+    const [w, h] = stageSize();
+    renderer.setSize(w, h);
+    composer.setSize(w, h);
+    sceneH.setDetail(t.low);
+  };
+  Q.set = (tier) => {
+    tier = Math.max(0, Math.min(TIERS.length - 1, tier));
+    if (tier === Q.tier) return;
+    Q.tier = tier; Q.lastChange = Q.clock; Q.changes++; Q.samples.length = 0;
+    Q.holdUntil = Q.clock + 2;   // let the new resolution settle before judging it
+    Q.apply();
+  };
+  // Judge on the median of the last 90 frame times, so one hitch (a GC,
+  // a tab switch) never costs resolution. Step down past ~45 fps; step
+  // back up only with clear headroom and at most once per 20 s.
+  Q.sample = (rawMs) => {
+    Q.clock += rawMs / 1000;
+    if (Q.pinned || Q.clock < Q.holdUntil || rawMs > 250) return;
+    Q.samples.push(rawMs);
+    if (Q.samples.length < 90) return;
+    const med = [...Q.samples].sort((a, b) => a - b)[45];
+    Q.samples.length = 0;
+    if (med > 22 && Q.tier < TIERS.length - 1) Q.set(Q.tier + 1);
+    else if (med < 11 && Q.tier > 0 && Q.clock - Q.lastChange > 20) Q.set(Q.tier - 1);
+  };
+  // Into a render target, r160 hands the clear (background) colour and
+  // the fog colour to the GPU unencoded; the gamma-space target above
+  // needs them sRGB-encoded, so the bloom render swaps in encoded copies.
+  const sc = sceneH.scene;
+  const encoded = (c) => { const o = { r: 0, g: 0, b: 0 }; c.getRGB(o, THREE.SRGBColorSpace); return new THREE.Color().setRGB(o.r, o.g, o.b, THREE.LinearSRGBColorSpace); };
+  const bgPlain = sc.background, bgEnc = encoded(sc.background);
+  const fogPlain = sc.fog.color.clone(), fogEnc = encoded(sc.fog.color);
+  Q.render = () => {
+    if (!TIERS[Q.tier].bloom) { renderer.render(sc, sceneH.camera); return; }
+    sc.background = bgEnc; sc.fog.color.copy(fogEnc);
+    composer.render();
+    sc.background = bgPlain; sc.fog.color.copy(fogPlain);
+  };
+  return Q;
+})();
+quality.apply();
+document.addEventListener?.('visibilitychange', () => { quality.holdUntil = quality.clock + 2; quality.samples.length = 0; });
+
 // ---------- board handlers (taps in the scene route here) ----------
 const ui = {
   selected: 'AAPL', tf: '15m', chartDirty: true, lastDraw: 0,
@@ -3975,6 +4111,7 @@ function syncCrewWork() {
 function applySize() {
   const [w, h] = stageSize();
   renderer.setSize(w, h);
+  composer.setSize(w, h);
   const flipped = board.setAspect(w / Math.max(1, h));
   if (flipped) sceneH.setFitPoints([...sceneH.screenAnchors(), ...board.framePoints()]);
   sceneH.setViewport(w, h);
@@ -4022,6 +4159,7 @@ function projectToClient(v) {
 let last = performance.now(), acc = { watch: 0, chain: 0, ticket: 0, perf: 0 };
 function frame(now) {
   requestAnimationFrame(frame);
+  quality.sample(now - last);
   let dt = Math.min(0.05, (now - last) / 1000); last = now;
   feed.update(dt);
   desk.update(dt);
@@ -4030,7 +4168,7 @@ function frame(now) {
   board.update(dt, sceneH.camera);
   // chart redraw: on dirty at ~4Hz, and ~11Hz while the beam is live
   const beamLive = TF_INTRA[ui.tf] && ui.beam.state !== 'lock';
-  if ((ui.chartDirty && now - ui.lastDraw > 240) || (beamLive && now - ui.lastDraw > 90) || (ui.beam.state === 'lock' && ui.chartDirty)) {
+  if ((ui.chartDirty && now - ui.lastDraw > 240) || (beamLive && now - ui.lastDraw > TIERS[quality.tier].beamMs) || (ui.beam.state === 'lock' && ui.chartDirty)) {
     chart.draw({ S: feed.series[ui.selected], tf: ui.tf, desk, beam: beamView(), now });
     sceneH.chartTex.needsUpdate = true;
     ui.lastDraw = now; ui.chartDirty = false;
@@ -4049,7 +4187,7 @@ function frame(now) {
     board.gauges(desk);
     if (board.isOpen('performance')) board.drawPerf(desk);
   }
-  renderer.render(sceneH.scene, sceneH.camera);
+  quality.render();
 }
 // growth's slow cycle: a rehearsal replay every ~15 min when the desk is free
 setInterval(() => { if (!desk.position && !desk.proposal && !desk._run) desk.runRehearsal(); }, 900000);
@@ -4072,7 +4210,8 @@ sceneH.chartTex.needsUpdate = true;
 requestAnimationFrame(frame);
 
 window.__holo = {
-  feed, desk, scene: sceneH, chart, ui, board, entries,
+  feed, desk, scene: sceneH, chart, ui, board, entries, quality,
+  qualityName: () => TIERS[quality.tier].name,
   selectSymbol, setTf,
   projectToClient,
   project: (arr) => projectToClient(new THREE.Vector3(arr[0], arr[1], arr[2])),
